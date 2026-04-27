@@ -1,11 +1,8 @@
-\
 import os
 import sys
-import math
 import html
-import time
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -21,7 +18,6 @@ from config import (
     MIN_DOLLAR_VOLUME,
     TOP_SECTORS,
     TOP_INDUSTRIES,
-    TOP_STOCKS_PER_HOT_SECTOR,
     TOP_STOCKS_OVERALL,
     TARGET_PACIFIC_TIMES,
     WEEKDAYS_ONLY,
@@ -35,16 +31,17 @@ def now_pacific() -> datetime:
 
 
 def should_send_now(force: bool = False) -> bool:
-    """Protects against DST problems and duplicate GitHub UTC schedules."""
     if force:
         return True
 
     now = now_pacific()
+
     if WEEKDAYS_ONLY and now.weekday() >= 5:
         print(f"Weekend in Pacific time: {now}. Exiting.")
         return False
 
     current_hhmm = now.strftime("%H:%M")
+
     if current_hhmm not in TARGET_PACIFIC_TIMES:
         print(f"Current Pacific time {current_hhmm} is not in target times {TARGET_PACIFIC_TIMES}. Exiting.")
         return False
@@ -53,7 +50,6 @@ def should_send_now(force: bool = False) -> bool:
 
 
 def normalize_ticker(t: str) -> str:
-    """Yahoo Finance uses '-' for tickers like BRK.B -> BRK-B."""
     return str(t).strip().replace(".", "-")
 
 
@@ -67,21 +63,21 @@ def safe_pct(x) -> float:
 
 
 def fetch_sp500_constituents() -> pd.DataFrame:
-    """
-    Pulls S&P 500 constituents from Wikipedia using a browser-like User-Agent.
-    Fixes GitHub Actions HTTP 403 issue.
-    """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        )
     }
 
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
 
     from io import StringIO
+
     tables = pd.read_html(StringIO(response.text))
     df = tables[0].copy()
 
@@ -98,12 +94,14 @@ def fetch_sp500_constituents() -> pd.DataFrame:
     return df[["Ticker", "Name", "Sector", "Industry"]]
 
 
-def download_prices(tickers: List[str], period: str = "3mo", interval: str = "1d", prepost: bool = False) -> pd.DataFrame:
-    """
-    Downloads adjusted OHLCV using yfinance.
-    Uses group_by='ticker' so multi-ticker output is easier to process.
-    """
+def download_prices(
+    tickers: List[str],
+    period: str = "3mo",
+    interval: str = "1d",
+    prepost: bool = False,
+) -> pd.DataFrame:
     tickers = sorted(set([t for t in tickers if isinstance(t, str) and len(t) > 0]))
+
     if not tickers:
         return pd.DataFrame()
 
@@ -117,20 +115,22 @@ def download_prices(tickers: List[str], period: str = "3mo", interval: str = "1d
         threads=True,
         progress=False,
     )
+
     return data
 
 
 def extract_single_ticker(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
+
     if isinstance(df.columns, pd.MultiIndex):
         if ticker not in df.columns.get_level_values(0):
             return pd.DataFrame()
         out = df[ticker].copy()
     else:
         out = df.copy()
-    out = out.dropna(how="all")
-    return out
+
+    return out.dropna(how="all")
 
 
 def etf_metrics(etf_map: Dict[str, str]) -> pd.DataFrame:
@@ -138,26 +138,32 @@ def etf_metrics(etf_map: Dict[str, str]) -> pd.DataFrame:
     daily = download_prices(tickers, period="3mo", interval="1d", prepost=False)
 
     rows = []
+
     spy = extract_single_ticker(daily, BENCHMARK)
     spy_ret_1d = 0.0
     spy_ret_5d = 0.0
+
     if len(spy) >= 6:
         spy_ret_1d = spy["Close"].iloc[-1] / spy["Close"].iloc[-2] - 1
         spy_ret_5d = spy["Close"].iloc[-1] / spy["Close"].iloc[-6] - 1
 
     for label, ticker in etf_map.items():
         d = extract_single_ticker(daily, ticker)
+
         if len(d) < 30:
             continue
 
         close = d["Close"]
-        vol = d["Volume"] if "Volume" in d.columns else pd.Series(index=d.index, data=np.nan)
+        vol = d["Volume"]
+
         ret_1d = close.iloc[-1] / close.iloc[-2] - 1
-        ret_5d = close.iloc[-1] / close.iloc[-6] - 1 if len(close) >= 6 else np.nan
-        ret_20d = close.iloc[-1] / close.iloc[-21] - 1 if len(close) >= 21 else np.nan
+        ret_5d = close.iloc[-1] / close.iloc[-6] - 1
+        ret_20d = close.iloc[-1] / close.iloc[-21] - 1
+
         above_20 = close.iloc[-1] > close.rolling(20).mean().iloc[-1]
         above_50 = close.iloc[-1] > close.rolling(50).mean().iloc[-1] if len(close) >= 50 else False
-        rvol = vol.iloc[-1] / vol.rolling(20).mean().iloc[-1] if "Volume" in d.columns else 1.0
+
+        rvol = vol.iloc[-1] / vol.rolling(20).mean().iloc[-1]
 
         score = (
             safe_pct(ret_1d) * 3.0
@@ -189,12 +195,50 @@ def etf_metrics(etf_map: Dict[str, str]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("Score", ascending=False)
 
 
-def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries: List[str]) -> pd.DataFrame:
-    # Limit to stocks in hot sectors for speed and quality.
+def is_hot_industry_match(stock_industry: str, hot_industries: List[str]) -> bool:
+    stock_industry_l = str(stock_industry).lower()
+
+    keyword_map = {
+        "Semiconductors": ["semiconductor"],
+        "Software": ["software"],
+        "Internet": ["interactive media", "internet", "broadline retail"],
+        "Solar": ["renewable", "electrical components"],
+        "Oil Services": ["oil", "gas", "energy equipment"],
+        "Oil & Gas Exploration": ["oil", "gas"],
+        "Cloud Computing": ["software", "it consulting", "interactive media"],
+        "Cybersecurity": ["software"],
+        "Biotech": ["biotechnology"],
+        "Pharma": ["pharmaceutical"],
+        "Regional Banks": ["regional banks"],
+        "Broker Dealers": ["investment banking", "brokerage"],
+        "Insurance": ["insurance"],
+        "Homebuilders": ["homebuilding"],
+        "Retail": ["retail"],
+        "Transportation": ["transportation", "air freight", "rail"],
+        "Aerospace & Defense": ["aerospace", "defense"],
+        "Metals & Mining": ["metals", "mining", "steel"],
+        "Gold Miners": ["gold", "mining"],
+        "REITs": ["reit"],
+    }
+
+    for hot in hot_industries:
+        keywords = keyword_map.get(hot, [hot.lower()])
+
+        for kw in keywords:
+            if kw.lower() in stock_industry_l:
+                return True
+
+    return False
+
+
+def stock_metrics(
+    universe: pd.DataFrame,
+    hot_sectors: List[str],
+    hot_industries: List[str],
+) -> pd.DataFrame:
     pool = universe[universe["Sector"].isin(hot_sectors)].copy()
     tickers = pool["Ticker"].dropna().unique().tolist()
 
-    # Keep one extra benchmark for relative strength.
     daily = download_prices(tickers + [BENCHMARK], period="6mo", interval="1d", prepost=False)
     spy = extract_single_ticker(daily, BENCHMARK)
 
@@ -207,6 +251,7 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries
 
     for ticker in tickers:
         d = extract_single_ticker(daily, ticker)
+
         if len(d) < 60:
             continue
 
@@ -230,8 +275,10 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries
         sma20 = close.rolling(20).mean().iloc[-1]
         sma50 = close.rolling(50).mean().iloc[-1]
         sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else np.nan
+
         rvol = vol.iloc[-1] / avg_vol_20 if avg_vol_20 > 0 else 1.0
         near_high_20 = close.iloc[-1] / high.rolling(20).max().iloc[-1] - 1
+
         atr14 = (high - low).rolling(14).mean().iloc[-1]
         atr_pct = atr14 / price if price > 0 else np.nan
 
@@ -251,19 +298,16 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries
             + safe_pct(ret_20d - spy_ret_20d) * 1.0
             + min(float(rvol), 4.0) * 2.0
             + trend_points
-            + max(0, 2.0 + safe_pct(near_high_20))  # prefers stocks near 20-day highs
-            - max(0, safe_pct(atr_pct) - 8) * 0.25  # small penalty for very wild stocks
+            + max(0, 2.0 + safe_pct(near_high_20))
+            - max(0, safe_pct(atr_pct) - 8) * 0.25
         )
-        # --- INDUSTRY BOOST (NEW LOGIC) ---
-        # --- INDUSTRY BOOST ---
-        industry_hot = False
+
         stock_industry = meta[ticker]["Industry"]
-        
-        for ind in hot_industries:
-            if ind.lower() in stock_industry.lower():
-                score += 25
-                industry_hot = True
-                break
+        industry_hot = is_hot_industry_match(stock_industry, hot_industries)
+
+        if industry_hot:
+            score += 25
+
         rows.append(
             {
                 "Ticker": ticker,
@@ -291,31 +335,6 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries
     return pd.DataFrame(rows).sort_values("Score", ascending=False)
 
 
-def format_table_rows(df: pd.DataFrame, columns: List[str], n: int) -> str:
-    if df.empty:
-        return "None"
-    lines = []
-    for _, r in df.head(n).iterrows():
-        parts = []
-        for c in columns:
-            v = r[c]
-            if isinstance(v, float):
-                if "%" in c:
-                    parts.append(f"{c}:{v:+.1f}")
-                elif c == "RVOL":
-                    parts.append(f"RVOL:{v:.1f}x")
-                elif c == "DollarVolM":
-                    parts.append(f"$Vol:{v:.0f}M")
-                elif c == "Score":
-                    parts.append(f"Score:{v:.1f}")
-                else:
-                    parts.append(f"{c}:{v:.2f}")
-            else:
-                parts.append(f"{v}")
-        lines.append(" | ".join(parts))
-    return "\n".join(lines)
-
-
 def build_message() -> str:
     run_time = now_pacific().strftime("%a %Y-%m-%d %I:%M %p PT")
 
@@ -326,12 +345,15 @@ def build_message() -> str:
 
     hot_sectors = sectors.head(TOP_SECTORS)["Group"].tolist()
     hot_industries = industries.head(TOP_INDUSTRIES)["Group"].tolist()
+
     leaders = stock_metrics(universe, hot_sectors, hot_industries)
+
     hot_industry_leaders = leaders[leaders["IndustryHot"] == True].copy()
 
     msg = []
-    msg.append(f"🔥 <b>Hot Sector / Industry / Stock Leaders</b>")
+    msg.append("🔥 <b>Hot Sector / Industry / Stock Leaders</b>")
     msg.append(f"<b>Run:</b> {html.escape(run_time)}")
+
     msg.append("")
     msg.append("<b>Top Hot Sectors</b>")
     for _, r in sectors.head(TOP_SECTORS).iterrows():
@@ -352,20 +374,23 @@ def build_message() -> str:
 
     msg.append("")
     msg.append("<b>Top Stock Leaders in Hot Sectors</b>")
+
     if leaders.empty:
         msg.append("No qualified leaders found based on filters.")
     else:
         for _, r in leaders.head(TOP_STOCKS_OVERALL).iterrows():
             msg.append(
                 f"• <b>{r['Ticker']}</b> — {html.escape(str(r['Name'])[:34])} | "
-                f"{html.escape(str(r['Sector']))}{' 🔥Industry' if r.get('IndustryHot', False) else ''} | "
+                f"{html.escape(str(r['Sector']))}"
+                f"{' 🔥Industry' if bool(r.get('IndustryHot', False)) else ''} | "
                 f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
                 f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
                 f"$Vol {r['DollarVolM']:.0f}M"
             )
+
     msg.append("")
     msg.append("<b>Top Stock Leaders in Hot Industries</b>")
-    
+
     if hot_industry_leaders.empty:
         msg.append("No qualified hot-industry leaders found.")
     else:
@@ -377,14 +402,14 @@ def build_message() -> str:
                 f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
                 f"$Vol {r['DollarVolM']:.0f}M"
             )
-    
+
     msg.append("")
     msg.append("<b>How to read this</b>")
     msg.append("Leader = strong sector + strong industry + stock outperforming SPY with volume and trend confirmation.")
     msg.append("Not financial advice. Use your chart rules, stop loss, and position sizing.")
 
-    # Telegram max message is 4096 chars. Keep safe.
     output = "\n".join(msg)
+
     return output
 
 
@@ -396,14 +421,16 @@ def send_telegram(message: str) -> None:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID GitHub secrets.")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+
     payload = {
         "chat_id": chat_id,
-        "text": message,
+        "text": message[:4090],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
 
     resp = requests.post(url, json=payload, timeout=30)
+
     if not resp.ok:
         raise RuntimeError(f"Telegram send failed: {resp.status_code} {resp.text}")
 
