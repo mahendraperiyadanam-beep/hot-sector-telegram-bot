@@ -68,13 +68,24 @@ def safe_pct(x) -> float:
 
 def fetch_sp500_constituents() -> pd.DataFrame:
     """
-    Pulls S&P 500 constituents from Wikipedia.
-    Columns used: Symbol, Security, GICS Sector, GICS Sub-Industry.
+    Pulls S&P 500 constituents from Wikipedia using a browser-like User-Agent.
+    Fixes GitHub Actions HTTP 403 issue.
     """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    }
+
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    tables = pd.read_html(response.text)
     df = tables[0].copy()
+
     df["Ticker"] = df["Symbol"].apply(normalize_ticker)
+
     df = df.rename(
         columns={
             "Security": "Name",
@@ -82,6 +93,7 @@ def fetch_sp500_constituents() -> pd.DataFrame:
             "GICS Sub-Industry": "Industry",
         }
     )
+
     return df[["Ticker", "Name", "Sector", "Industry"]]
 
 
