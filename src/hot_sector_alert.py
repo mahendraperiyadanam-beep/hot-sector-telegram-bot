@@ -189,7 +189,7 @@ def etf_metrics(etf_map: Dict[str, str]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("Score", ascending=False)
 
 
-def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str]) -> pd.DataFrame:
+def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries: List[str]) -> pd.DataFrame:
     # Limit to stocks in hot sectors for speed and quality.
     pool = universe[universe["Sector"].isin(hot_sectors)].copy()
     tickers = pool["Ticker"].dropna().unique().tolist()
@@ -254,7 +254,13 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str]) -> pd.DataFram
             + max(0, 2.0 + safe_pct(near_high_20))  # prefers stocks near 20-day highs
             - max(0, safe_pct(atr_pct) - 8) * 0.25  # small penalty for very wild stocks
         )
-
+        # --- INDUSTRY BOOST (NEW LOGIC) ---
+        stock_industry = meta[ticker]["Industry"]
+        
+        for ind in hot_industries:
+            if ind.lower() in stock_industry.lower():
+                score += 8     # previously 5
+                break
         rows.append(
             {
                 "Ticker": ticker,
@@ -315,7 +321,8 @@ def build_message() -> str:
     industries = etf_metrics(INDUSTRY_ETFS)
 
     hot_sectors = sectors.head(TOP_SECTORS)["Group"].tolist()
-    leaders = stock_metrics(universe, hot_sectors)
+    hot_industries = industries.head(TOP_INDUSTRIES)["Group"].tolist()
+    leaders = stock_metrics(universe, hot_sectors, hot_industries)
 
     msg = []
     msg.append(f"🔥 <b>Hot Sector / Industry / Stock Leaders</b>")
