@@ -26,60 +26,80 @@ from config import (
 PACIFIC = pytz.timezone("America/Los_Angeles")
 
 
-def now_pacific() -> datetime:
+def now_pacific():
     return datetime.now(PACIFIC)
 
 
-def should_send_now(force: bool = False) -> bool:
+def should_send_now(force=False):
     if force:
         return True
 
     now = now_pacific()
 
     if WEEKDAYS_ONLY and now.weekday() >= 5:
-        print(f"Weekend in Pacific time: {now}. Exiting.")
         return False
 
-    current_hhmm = now.strftime("%H:%M")
-
-    if current_hhmm not in TARGET_PACIFIC_TIMES:
-        print(f"Current Pacific time {current_hhmm} is not in target times {TARGET_PACIFIC_TIMES}. Exiting.")
-        return False
-
-    return True
+    return now.strftime("%H:%M") in TARGET_PACIFIC_TIMES
 
 
-def normalize_ticker(t: str) -> str:
+def normalize_ticker(t):
     return str(t).strip().replace(".", "-")
 
 
-def safe_pct(x) -> float:
+def safe_pct(x):
     try:
         if pd.isna(x) or not np.isfinite(x):
             return 0.0
-        return float(x) * 100.0
-    except Exception:
+        return float(x) * 100
+    except:
         return 0.0
 
 
-def fetch_sp500_constituents() -> pd.DataFrame:
+# =========================
+# SECTOR FIX (CRITICAL)
+# =========================
+def map_hot_sector_to_gics(sector):
+    mapping = {
+        "Technology": "Information Technology",
+        "Consumer Discretionary": "Consumer Discretionary",
+        "Materials": "Materials",
+    }
+    return mapping.get(sector, sector)
+
+
+# =========================
+# INDUSTRY MATCH FIX
+# =========================
+def is_hot_industry(stock_industry, hot_industries):
+    s = stock_industry.lower()
+
+    for h in hot_industries:
+        h = h.lower()
+
+        if "semi" in h and "semiconductor" in s:
+            return True
+        if "software" in h and "software" in s:
+            return True
+        if "internet" in h and ("internet" in s or "interactive" in s or "retail" in s):
+            return True
+        if "oil" in h and ("oil" in s or "gas" in s):
+            return True
+        if "solar" in h and ("renewable" in s or "electrical" in s):
+            return True
+
+    return False
+
+
+def fetch_sp500_constituents():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        )
-    }
-
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(url, headers=headers)
 
     from io import StringIO
 
-    tables = pd.read_html(StringIO(response.text))
-    df = tables[0].copy()
+    tables = pd.read_html(StringIO(res.text))
+    df = tables[0]
 
     df["Ticker"] = df["Symbol"].apply(normalize_ticker)
 
@@ -94,248 +114,123 @@ def fetch_sp500_constituents() -> pd.DataFrame:
     return df[["Ticker", "Name", "Sector", "Industry"]]
 
 
-def download_prices(
-    tickers: List[str],
-    period: str = "3mo",
-    interval: str = "1d",
-    prepost: bool = False,
-) -> pd.DataFrame:
-    tickers = sorted(set([t for t in tickers if isinstance(t, str) and len(t) > 0]))
-
-    if not tickers:
-        return pd.DataFrame()
-
-    data = yf.download(
-        tickers=tickers,
+def download_prices(tickers, period="3mo"):
+    return yf.download(
+        tickers,
         period=period,
-        interval=interval,
         group_by="ticker",
         auto_adjust=True,
-        prepost=prepost,
-        threads=True,
         progress=False,
     )
 
-    return data
 
-
-def extract_single_ticker(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame()
-
+def extract(df, ticker):
     if isinstance(df.columns, pd.MultiIndex):
-        if ticker not in df.columns.get_level_values(0):
-            return pd.DataFrame()
-        out = df[ticker].copy()
-    else:
-        out = df.copy()
-
-    return out.dropna(how="all")
+        return df[ticker].dropna()
+    return df.dropna()
 
 
-def etf_metrics(etf_map: Dict[str, str]) -> pd.DataFrame:
-    tickers = list(etf_map.values()) + [BENCHMARK]
-    daily = download_prices(tickers, period="3mo", interval="1d", prepost=False)
+def etf_metrics(etfs):
+    tickers = list(etfs.values()) + [BENCHMARK]
+    df = download_prices(tickers)
+
+    spy = extract(df, BENCHMARK)
+
+    spy_1d = spy["Close"].pct_change().iloc[-1]
+    spy_5d = spy["Close"].pct_change(5).iloc[-1]
 
     rows = []
 
-    spy = extract_single_ticker(daily, BENCHMARK)
-    spy_ret_1d = 0.0
-    spy_ret_5d = 0.0
+    for name, t in etfs.items():
+        d = extract(df, t)
+        c = d["Close"]
+        v = d["Volume"]
 
-    if len(spy) >= 6:
-        spy_ret_1d = spy["Close"].iloc[-1] / spy["Close"].iloc[-2] - 1
-        spy_ret_5d = spy["Close"].iloc[-1] / spy["Close"].iloc[-6] - 1
+        r1 = c.pct_change().iloc[-1]
+        r5 = c.pct_change(5).iloc[-1]
 
-    for label, ticker in etf_map.items():
-        d = extract_single_ticker(daily, ticker)
-
-        if len(d) < 30:
-            continue
-
-        close = d["Close"]
-        vol = d["Volume"]
-
-        ret_1d = close.iloc[-1] / close.iloc[-2] - 1
-        ret_5d = close.iloc[-1] / close.iloc[-6] - 1
-        ret_20d = close.iloc[-1] / close.iloc[-21] - 1
-
-        above_20 = close.iloc[-1] > close.rolling(20).mean().iloc[-1]
-        above_50 = close.iloc[-1] > close.rolling(50).mean().iloc[-1] if len(close) >= 50 else False
-
-        rvol = vol.iloc[-1] / vol.rolling(20).mean().iloc[-1]
+        rvol = v.iloc[-1] / v.rolling(20).mean().iloc[-1]
 
         score = (
-            safe_pct(ret_1d) * 3.0
-            + safe_pct(ret_5d) * 1.5
-            + safe_pct(ret_20d) * 0.5
-            + safe_pct(ret_1d - spy_ret_1d) * 2.0
-            + safe_pct(ret_5d - spy_ret_5d) * 1.0
-            + min(float(rvol), 3.0) * 1.0
-            + (2.0 if above_20 else 0.0)
-            + (2.0 if above_50 else 0.0)
+            safe_pct(r1) * 3
+            + safe_pct(r5) * 2
+            + safe_pct(r1 - spy_1d) * 2
+            + rvol
         )
 
         rows.append(
-            {
-                "Group": label,
-                "ETF": ticker,
-                "Price": close.iloc[-1],
-                "1D%": safe_pct(ret_1d),
-                "5D%": safe_pct(ret_5d),
-                "20D%": safe_pct(ret_20d),
-                "RS_vs_SPY_1D%": safe_pct(ret_1d - spy_ret_1d),
-                "RVOL": float(rvol) if pd.notna(rvol) else 1.0,
-                "Above20": bool(above_20),
-                "Above50": bool(above_50),
-                "Score": float(score),
-            }
+            dict(Group=name, ETF=t, **{"1D%": safe_pct(r1), "5D%": safe_pct(r5), "RVOL": rvol, "Score": score})
         )
 
     return pd.DataFrame(rows).sort_values("Score", ascending=False)
 
 
-def is_hot_industry_match(stock_industry: str, hot_industries: List[str]) -> bool:
-    stock_industry_l = str(stock_industry).lower()
+def stock_metrics(universe, hot_sectors, hot_industries):
+    mapped = [map_hot_sector_to_gics(s) for s in hot_sectors]
 
-    keyword_map = {
-        "Semiconductors": ["semiconductor"],
-        "Software": ["software"],
-        "Internet": ["interactive media", "internet", "broadline retail"],
-        "Solar": ["renewable", "electrical components"],
-        "Oil Services": ["oil", "gas", "energy equipment"],
-        "Oil & Gas Exploration": ["oil", "gas"],
-        "Cloud Computing": ["software", "it consulting", "interactive media"],
-        "Cybersecurity": ["software"],
-        "Biotech": ["biotechnology"],
-        "Pharma": ["pharmaceutical"],
-        "Regional Banks": ["regional banks"],
-        "Broker Dealers": ["investment banking", "brokerage"],
-        "Insurance": ["insurance"],
-        "Homebuilders": ["homebuilding"],
-        "Retail": ["retail"],
-        "Transportation": ["transportation", "air freight", "rail"],
-        "Aerospace & Defense": ["aerospace", "defense"],
-        "Metals & Mining": ["metals", "mining", "steel"],
-        "Gold Miners": ["gold", "mining"],
-        "REITs": ["reit"],
-    }
+    pool = universe[universe["Sector"].isin(mapped)]
 
-    for hot in hot_industries:
-        keywords = keyword_map.get(hot, [hot.lower()])
+    tickers = pool["Ticker"].tolist()
 
-        for kw in keywords:
-            if kw.lower() in stock_industry_l:
-                return True
+    df = download_prices(tickers + [BENCHMARK], "6mo")
+    spy = extract(df, BENCHMARK)
 
-    return False
-
-
-def stock_metrics(
-    universe: pd.DataFrame,
-    hot_sectors: List[str],
-    hot_industries: List[str],
-) -> pd.DataFrame:
-    pool = universe[universe["Sector"].isin(hot_sectors)].copy()
-    tickers = pool["Ticker"].dropna().unique().tolist()
-
-    daily = download_prices(tickers + [BENCHMARK], period="6mo", interval="1d", prepost=False)
-    spy = extract_single_ticker(daily, BENCHMARK)
-
-    spy_ret_1d = spy["Close"].iloc[-1] / spy["Close"].iloc[-2] - 1 if len(spy) >= 2 else 0
-    spy_ret_5d = spy["Close"].iloc[-1] / spy["Close"].iloc[-6] - 1 if len(spy) >= 6 else 0
-    spy_ret_20d = spy["Close"].iloc[-1] / spy["Close"].iloc[-21] - 1 if len(spy) >= 21 else 0
+    spy_1d = spy["Close"].pct_change().iloc[-1]
 
     rows = []
+
     meta = pool.set_index("Ticker").to_dict("index")
 
-    for ticker in tickers:
-        d = extract_single_ticker(daily, ticker)
+    for t in tickers:
+        d = extract(df, t)
 
-        if len(d) < 60:
+        if len(d) < 50:
             continue
 
-        close = d["Close"]
-        high = d["High"]
-        low = d["Low"]
-        vol = d["Volume"]
+        c = d["Close"]
+        v = d["Volume"]
 
-        price = float(close.iloc[-1])
-        avg_vol_20 = float(vol.rolling(20).mean().iloc[-1])
-        dollar_vol = price * avg_vol_20
+        price = c.iloc[-1]
+        dv = price * v.rolling(20).mean().iloc[-1]
 
-        if price < MIN_PRICE or dollar_vol < MIN_DOLLAR_VOLUME:
+        if price < MIN_PRICE or dv < MIN_DOLLAR_VOLUME:
             continue
 
-        ret_1d = close.iloc[-1] / close.iloc[-2] - 1
-        ret_5d = close.iloc[-1] / close.iloc[-6] - 1
-        ret_20d = close.iloc[-1] / close.iloc[-21] - 1
-        ret_63d = close.iloc[-1] / close.iloc[-64] - 1 if len(close) >= 64 else np.nan
+        r1 = c.pct_change().iloc[-1]
+        r5 = c.pct_change(5).iloc[-1]
+        r20 = c.pct_change(20).iloc[-1]
 
-        sma20 = close.rolling(20).mean().iloc[-1]
-        sma50 = close.rolling(50).mean().iloc[-1]
-        sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else np.nan
-
-        rvol = vol.iloc[-1] / avg_vol_20 if avg_vol_20 > 0 else 1.0
-        near_high_20 = close.iloc[-1] / high.rolling(20).max().iloc[-1] - 1
-
-        atr14 = (high - low).rolling(14).mean().iloc[-1]
-        atr_pct = atr14 / price if price > 0 else np.nan
-
-        trend_points = 0
-        trend_points += 2 if close.iloc[-1] > sma20 else 0
-        trend_points += 2 if close.iloc[-1] > sma50 else 0
-        trend_points += 2 if pd.notna(sma200) and close.iloc[-1] > sma200 else 0
-        trend_points += 1 if sma20 > sma50 else 0
+        rvol = v.iloc[-1] / v.rolling(20).mean().iloc[-1]
 
         score = (
-            safe_pct(ret_1d) * 3.0
-            + safe_pct(ret_5d) * 2.0
-            + safe_pct(ret_20d) * 0.75
-            + safe_pct(ret_63d) * 0.25
-            + safe_pct(ret_1d - spy_ret_1d) * 2.0
-            + safe_pct(ret_5d - spy_ret_5d) * 1.5
-            + safe_pct(ret_20d - spy_ret_20d) * 1.0
-            + min(float(rvol), 4.0) * 2.0
-            + trend_points
-            + max(0, 2.0 + safe_pct(near_high_20))
-            - max(0, safe_pct(atr_pct) - 8) * 0.25
+            safe_pct(r1) * 3
+            + safe_pct(r5) * 2
+            + safe_pct(r20)
+            + safe_pct(r1 - spy_1d) * 2
+            + rvol * 2
         )
 
-        stock_industry = meta[ticker]["Industry"]
-        industry_hot = is_hot_industry_match(stock_industry, hot_industries)
+        industry = meta[t]["Industry"]
+        industry_hot = is_hot_industry(industry, hot_industries)
 
         if industry_hot:
             score += 25
 
         rows.append(
-            {
-                "Ticker": ticker,
-                "Name": meta[ticker]["Name"],
-                "Sector": meta[ticker]["Sector"],
-                "Industry": meta[ticker]["Industry"],
-                "IndustryHot": industry_hot,
-                "Price": price,
-                "1D%": safe_pct(ret_1d),
-                "5D%": safe_pct(ret_5d),
-                "20D%": safe_pct(ret_20d),
-                "63D%": safe_pct(ret_63d),
-                "RS_1D%": safe_pct(ret_1d - spy_ret_1d),
-                "RS_5D%": safe_pct(ret_5d - spy_ret_5d),
-                "RVOL": float(rvol),
-                "DollarVolM": dollar_vol / 1_000_000,
-                "Near20DHigh%": safe_pct(near_high_20),
-                "Score": float(score),
-            }
+            dict(
+                Ticker=t,
+                Name=meta[t]["Name"],
+                Sector=meta[t]["Sector"],
+                Industry=industry,
+                IndustryHot=industry_hot,
+                **{"1D%": safe_pct(r1), "5D%": safe_pct(r5), "20D%": safe_pct(r20), "RVOL": rvol, "DollarVolM": dv / 1e6, "Score": score},
+            )
         )
-
-    if not rows:
-        return pd.DataFrame()
 
     return pd.DataFrame(rows).sort_values("Score", ascending=False)
 
 
-def build_message() -> str:
+def build_message():
     run_time = now_pacific().strftime("%a %Y-%m-%d %I:%M %p PT")
 
     universe = fetch_sp500_constituents()
@@ -348,102 +243,61 @@ def build_message() -> str:
 
     leaders = stock_metrics(universe, hot_sectors, hot_industries)
 
-    hot_industry_leaders = leaders[leaders["IndustryHot"] == True].copy()
+    # REMOVE DUPLICATES
+    top_sector = leaders.head(TOP_STOCKS_OVERALL)
+    remaining = leaders[~leaders["Ticker"].isin(top_sector["Ticker"])]
+
+    hot_industry_leaders = remaining[remaining["IndustryHot"]].head(10)
 
     msg = []
     msg.append("🔥 <b>Hot Sector / Industry / Stock Leaders</b>")
-    msg.append(f"<b>Run:</b> {html.escape(run_time)}")
+    msg.append(f"<b>Run:</b> {run_time}")
 
-    msg.append("")
-    msg.append("<b>Top Hot Sectors</b>")
+    msg.append("\n<b>Top Hot Sectors</b>")
     for _, r in sectors.head(TOP_SECTORS).iterrows():
-        msg.append(
-            f"• <b>{html.escape(r['Group'])}</b> ({r['ETF']}): "
-            f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
-            f"RS {r['RS_vs_SPY_1D%']:+.1f}% | RVOL {r['RVOL']:.1f}x"
-        )
+        msg.append(f"• {r['Group']} ({r['ETF']})")
 
-    msg.append("")
-    msg.append("<b>Top Hot Industries / Themes</b>")
+    msg.append("\n<b>Top Hot Industries</b>")
     for _, r in industries.head(TOP_INDUSTRIES).iterrows():
+        msg.append(f"• {r['Group']} ({r['ETF']})")
+
+    msg.append("\n<b>Top Stock Leaders in Hot Sectors</b>")
+    for _, r in top_sector.iterrows():
         msg.append(
-            f"• <b>{html.escape(r['Group'])}</b> ({r['ETF']}): "
-            f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
-            f"RS {r['RS_vs_SPY_1D%']:+.1f}% | RVOL {r['RVOL']:.1f}x"
+            f"• <b>{r['Ticker']}</b> — {r['Sector']}"
+            f"{' 🔥Industry' if r['IndustryHot'] else ''} | 5D {r['5D%']:+.1f}%"
         )
 
-    msg.append("")
-    msg.append("<b>Top Stock Leaders in Hot Sectors</b>")
-
-    if leaders.empty:
-        msg.append("No qualified leaders found based on filters.")
-    else:
-        for _, r in leaders.head(TOP_STOCKS_OVERALL).iterrows():
-            msg.append(
-                f"• <b>{r['Ticker']}</b> — {html.escape(str(r['Name'])[:34])} | "
-                f"{html.escape(str(r['Sector']))}"
-                f"{' 🔥Industry' if bool(r.get('IndustryHot', False)) else ''} | "
-                f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
-                f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
-                f"$Vol {r['DollarVolM']:.0f}M"
-            )
-
-    msg.append("")
-    msg.append("<b>Top Stock Leaders in Hot Industries</b>")
-
+    msg.append("\n<b>Top Stock Leaders in Hot Industries</b>")
     if hot_industry_leaders.empty:
-        msg.append("No qualified hot-industry leaders found.")
+        msg.append("None")
     else:
-        for _, r in hot_industry_leaders.head(10).iterrows():
+        for _, r in hot_industry_leaders.iterrows():
             msg.append(
-                f"• <b>{r['Ticker']}</b> — {html.escape(str(r['Name'])[:34])} | "
-                f"{html.escape(str(r['Industry']))} | "
-                f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
-                f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
-                f"$Vol {r['DollarVolM']:.0f}M"
+                f"• <b>{r['Ticker']}</b> — {r['Industry']} | 5D {r['5D%']:+.1f}%"
             )
 
-    msg.append("")
-    msg.append("<b>How to read this</b>")
-    msg.append("Leader = strong sector + strong industry + stock outperforming SPY with volume and trend confirmation.")
-    msg.append("Not financial advice. Use your chart rules, stop loss, and position sizing.")
-
-    output = "\n".join(msg)
-
-    return output
+    return "\n".join(msg)
 
 
-def send_telegram(message: str) -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-
-    if not token or not chat_id:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID GitHub secrets.")
+def send_telegram(msg):
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat = os.environ["TELEGRAM_CHAT_ID"]
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
-    payload = {
-        "chat_id": chat_id,
-        "text": message[:4090],
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
-    resp = requests.post(url, json=payload, timeout=30)
-
-    if not resp.ok:
-        raise RuntimeError(f"Telegram send failed: {resp.status_code} {resp.text}")
+    requests.post(url, json={"chat_id": chat, "text": msg, "parse_mode": "HTML"})
 
 
-def main() -> None:
-    force = "--force" in sys.argv or os.environ.get("FORCE_SEND", "false").lower() == "true"
+def main():
+    force = "--force" in sys.argv or os.environ.get("FORCE_SEND") == "true"
 
-    if not should_send_now(force=force):
+    if not should_send_now(force):
         return
 
-    message = build_message()
-    print(message)
-    send_telegram(message)
+    msg = build_message()
+    print(msg)
+    send_telegram(msg)
 
 
 if __name__ == "__main__":
