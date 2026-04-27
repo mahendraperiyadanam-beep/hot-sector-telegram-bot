@@ -327,6 +327,7 @@ def build_message() -> str:
     hot_sectors = sectors.head(TOP_SECTORS)["Group"].tolist()
     hot_industries = industries.head(TOP_INDUSTRIES)["Group"].tolist()
     leaders = stock_metrics(universe, hot_sectors, hot_industries)
+    hot_industry_leaders = leaders[leaders["IndustryHot"] == True].copy()
 
     msg = []
     msg.append(f"🔥 <b>Hot Sector / Industry / Stock Leaders</b>")
@@ -362,7 +363,21 @@ def build_message() -> str:
                 f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
                 f"$Vol {r['DollarVolM']:.0f}M"
             )
-
+    msg.append("")
+    msg.append("<b>Top Stock Leaders in Hot Industries</b>")
+    
+    if hot_industry_leaders.empty:
+        msg.append("No qualified hot-industry leaders found.")
+    else:
+        for _, r in hot_industry_leaders.head(10).iterrows():
+            msg.append(
+                f"• <b>{r['Ticker']}</b> — {html.escape(str(r['Name'])[:34])} | "
+                f"{html.escape(str(r['Industry']))} | "
+                f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
+                f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
+                f"$Vol {r['DollarVolM']:.0f}M"
+            )
+    
     msg.append("")
     msg.append("<b>How to read this</b>")
     msg.append("Leader = strong sector + strong industry + stock outperforming SPY with volume and trend confirmation.")
@@ -370,7 +385,7 @@ def build_message() -> str:
 
     # Telegram max message is 4096 chars. Keep safe.
     output = "\n".join(msg)
-    return output[:3900]
+    return output
 
 
 def send_telegram(message: str) -> None:
