@@ -255,11 +255,14 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries
             - max(0, safe_pct(atr_pct) - 8) * 0.25  # small penalty for very wild stocks
         )
         # --- INDUSTRY BOOST (NEW LOGIC) ---
+        # --- INDUSTRY BOOST ---
+        industry_hot = False
         stock_industry = meta[ticker]["Industry"]
         
         for ind in hot_industries:
             if ind.lower() in stock_industry.lower():
-                score += 8     # previously 5
+                score += 25
+                industry_hot = True
                 break
         rows.append(
             {
@@ -267,6 +270,7 @@ def stock_metrics(universe: pd.DataFrame, hot_sectors: List[str], hot_industries
                 "Name": meta[ticker]["Name"],
                 "Sector": meta[ticker]["Sector"],
                 "Industry": meta[ticker]["Industry"],
+                "IndustryHot": industry_hot,
                 "Price": price,
                 "1D%": safe_pct(ret_1d),
                 "5D%": safe_pct(ret_5d),
@@ -353,7 +357,7 @@ def build_message() -> str:
         for _, r in leaders.head(TOP_STOCKS_OVERALL).iterrows():
             msg.append(
                 f"• <b>{r['Ticker']}</b> — {html.escape(str(r['Name'])[:34])} | "
-                f"{html.escape(str(r['Sector']))} | "
+                f"{html.escape(str(r['Sector']))}{' 🔥Industry' if r.get('IndustryHot', False) else ''} | "
                 f"1D {r['1D%']:+.1f}% | 5D {r['5D%']:+.1f}% | "
                 f"20D {r['20D%']:+.1f}% | RVOL {r['RVOL']:.1f}x | "
                 f"$Vol {r['DollarVolM']:.0f}M"
