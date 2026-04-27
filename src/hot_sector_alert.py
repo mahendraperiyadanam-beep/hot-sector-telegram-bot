@@ -81,7 +81,8 @@ def fetch_sp500_constituents() -> pd.DataFrame:
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
 
-    tables = pd.read_html(response.text)
+    from io import StringIO
+    tables = pd.read_html(StringIO(response.text))
     df = tables[0].copy()
 
     df["Ticker"] = df["Symbol"].apply(normalize_ticker)
