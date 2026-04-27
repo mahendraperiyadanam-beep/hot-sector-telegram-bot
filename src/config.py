@@ -49,7 +49,7 @@ MIN_DOLLAR_VOLUME = 20_000_000
 TOP_SECTORS = 3
 TOP_INDUSTRIES = 5
 TOP_STOCKS_PER_HOT_SECTOR = 8
-TOP_STOCKS_OVERALL = 25
+TOP_STOCKS_OVERALL = 20
 
 # Target Pacific times. GitHub cron runs in UTC, so the workflow fires at both
 # PST and PDT equivalents. The Python script sends only when local Pacific time matches this list.
